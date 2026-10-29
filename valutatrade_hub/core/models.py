@@ -78,3 +78,55 @@ class User:
         password_with_salt = password + self._salt
         password_hash = hashlib.sha256(password_with_salt.encode("utf-8")).hexdigest()
         return password_hash == self._hashed_password
+
+
+class Wallet:
+    """Кошелёк пользователя для одной валюты."""
+
+    def __init__(self, currency_code: str, balance: float = 0.0) -> None:
+        if not isinstance(currency_code, str) or not currency_code.strip():
+            raise ValueError("Код валюты не может быть пустым")
+
+        self.currency_code = currency_code.strip().upper()
+        self.balance = balance
+
+    @property
+    def balance(self) -> float:
+        """Вернуть текущий баланс."""
+        return self._balance
+
+    @balance.setter
+    def balance(self, value: float) -> None:
+        """Установить неотрицательное числовое значение баланса."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("Баланс должен быть числом")
+        if value < 0:
+            raise ValueError("Баланс не может быть отрицательным")
+        self._balance = float(value)
+
+    def deposit(self, amount: float) -> None:
+        """Пополнить кошелёк на положительную сумму."""
+        self._validate_amount(amount)
+        self.balance += amount
+
+    def withdraw(self, amount: float) -> None:
+        """Снять с кошелька положительную сумму, если средств достаточно."""
+        self._validate_amount(amount)
+        if amount > self._balance:
+            raise ValueError("Недостаточно средств на балансе")
+        self.balance -= amount
+
+    def get_balance_info(self) -> dict[str, str | float]:
+        """Вернуть код валюты и текущий баланс."""
+        return {
+            "currency_code": self.currency_code,
+            "balance": self._balance,
+        }
+
+    @staticmethod
+    def _validate_amount(amount: float) -> None:
+        """Проверить сумму пополнения или снятия."""
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            raise TypeError("Сумма должна быть числом")
+        if amount <= 0:
+            raise ValueError("Сумма должна быть больше нуля")
