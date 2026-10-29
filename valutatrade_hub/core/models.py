@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 
+from valutatrade_hub.core.utils import normalize_currency_code, validate_amount
+
 
 class User:
     """Пользователь системы."""
@@ -84,10 +86,7 @@ class Wallet:
     """Кошелёк пользователя для одной валюты."""
 
     def __init__(self, currency_code: str, balance: float = 0.0) -> None:
-        if not isinstance(currency_code, str) or not currency_code.strip():
-            raise ValueError("Код валюты не может быть пустым")
-
-        self.currency_code = currency_code.strip().upper()
+        self.currency_code = normalize_currency_code(currency_code)
         self.balance = balance
 
     @property
@@ -106,12 +105,12 @@ class Wallet:
 
     def deposit(self, amount: float) -> None:
         """Пополнить кошелёк на положительную сумму."""
-        self._validate_amount(amount)
+        amount = validate_amount(amount)
         self.balance += amount
 
     def withdraw(self, amount: float) -> None:
         """Снять с кошелька положительную сумму, если средств достаточно."""
-        self._validate_amount(amount)
+        amount = validate_amount(amount)
         if amount > self._balance:
             raise ValueError("Недостаточно средств на балансе")
         self.balance -= amount
@@ -123,24 +122,16 @@ class Wallet:
             "balance": self._balance,
         }
 
-    @staticmethod
-    def _validate_amount(amount: float) -> None:
-        """Проверить сумму пополнения или снятия."""
-        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
-            raise TypeError("Сумма должна быть числом")
-        if amount <= 0:
-            raise ValueError("Сумма должна быть больше нуля")
-
 
 class Portfolio:
     """Набор валютных кошельков одного пользователя."""
 
     exchange_rates = {
         "USD": 1.0,
-        "EUR": 1.1,
-        "RUB": 0.011,
-        "BTC": 60_000.0,
-        "ETH": 3_000.0,
+        "EUR": 1.0786,
+        "RUB": 0.01016,
+        "BTC": 59_337.21,
+        "ETH": 3_720.0,
     }
 
     def __init__(
@@ -173,10 +164,7 @@ class Portfolio:
 
     def add_currency(self, currency_code: str) -> None:
         """Добавить пустой кошелёк для новой валюты."""
-        if not isinstance(currency_code, str) or not currency_code.strip():
-            raise ValueError("Код валюты не может быть пустым")
-
-        normalized_code = currency_code.strip().upper()
+        normalized_code = normalize_currency_code(currency_code)
         if normalized_code in self._wallets:
             raise ValueError(f"Кошелёк {normalized_code} уже существует")
 
@@ -184,16 +172,12 @@ class Portfolio:
 
     def get_wallet(self, currency_code: str) -> Wallet | None:
         """Вернуть кошелёк по коду валюты или None, если его нет."""
-        if not isinstance(currency_code, str):
-            return None
-        return self._wallets.get(currency_code.strip().upper())
+        normalized_code = normalize_currency_code(currency_code)
+        return self._wallets.get(normalized_code)
 
     def get_total_value(self, base_currency: str = "USD") -> float:
         """Рассчитать стоимость всех кошельков в базовой валюте."""
-        if not isinstance(base_currency, str):
-            raise TypeError("Код базовой валюты должен быть строкой")
-
-        normalized_base = base_currency.strip().upper()
+        normalized_base = normalize_currency_code(base_currency)
         if normalized_base not in self.exchange_rates:
             raise ValueError(f"Неизвестный курс валюты {normalized_base}")
 

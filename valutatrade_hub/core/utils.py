@@ -12,6 +12,22 @@ RATES_FILE = DATA_DIR / "rates.json"
 JsonData = list[dict[str, object]] | dict[str, object]
 
 
+def validate_amount(amount: object) -> float:
+    """Проверить сумму операции и вернуть её как float."""
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        raise TypeError("Сумма должна быть числом")
+    if amount <= 0:
+        raise ValueError("Сумма должна быть больше нуля")
+    return float(amount)
+
+
+def normalize_currency_code(currency_code: object) -> str:
+    """Проверить и привести код валюты к верхнему регистру."""
+    if not isinstance(currency_code, str) or not currency_code.strip():
+        raise ValueError("Код валюты должен быть непустой строкой")
+    return currency_code.strip().upper()
+
+
 def load_json(file_path: str | Path, default: JsonData | None = None) -> JsonData:
     """Прочитать список или словарь из JSON-файла."""
     path = Path(file_path)
