@@ -1,11 +1,17 @@
 """Бизнес-логика приложения."""
 
+import secrets
+from datetime import datetime, timedelta
 from pathlib import Path
 
+from valutatrade_hub.core.models import Portfolio, User, Wallet
 from valutatrade_hub.core.utils import (
+    PORTFOLIOS_FILE,
     RATES_FILE,
+    USERS_FILE,
     load_json,
     normalize_currency_code,
+    save_json,
     validate_amount,
 )
 
@@ -39,6 +45,35 @@ class RateService:
 
         return from_usd / to_usd
 
+    def get_rate_info(
+        self,
+        from_currency: str,
+        to_currency: str = "USD",
+    ) -> dict[str, str | float]:
+        """Вернуть курс и время обновления локального кеша."""
+        from_code = normalize_currency_code(from_currency)
+        to_code = normalize_currency_code(to_currency)
+        rate = self.get_rate(from_code, to_code)
+
+        rates = load_json(self._rates_file, {})
+        if not isinstance(rates, dict):
+            raise ValueError("Файл курсов должен содержать словарь")
+
+        updated_at = self._find_updated_at(rates, from_code, to_code)
+        if self._is_outdated(updated_at):
+            updated_at = datetime.now().isoformat(timespec="seconds")
+            rates["source"] = "Stub"
+            rates["last_refresh"] = updated_at
+            self._update_pair_timestamp(rates, from_code, to_code, updated_at)
+            save_json(self._rates_file, rates)
+
+        return {
+            "from_currency": from_code,
+            "to_currency": to_code,
+            "rate": rate,
+            "updated_at": updated_at,
+        }
+
     @staticmethod
     def _find_direct_rate(
         rates: dict[str, object],
@@ -55,3 +90,280 @@ class RateService:
             return 1 / validate_amount(reverse_data["rate"])
 
         return None
+
+    @staticmethod
+    def _find_updated_at(
+        rates: dict[str, object],
+        from_code: str,
+        to_code: str,
+    ) -> str:
+        """Найти время обновления прямой или обратной пары."""
+        for pair in (f"{from_code}_{to_code}", f"{to_code}_{from_code}"):
+            pair_data = rates.get(pair)
+            if isinstance(pair_data, dict):
+                updated_at = pair_data.get("updated_at")
+                if isinstance(updated_at, str):
+                    return updated_at
+
+        last_refresh = rates.get("last_refresh")
+        if isinstance(last_refresh, str):
+            return last_refresh
+        return ""
+
+    @staticmethod
+    def _is_outdated(updated_at: str) -> bool:
+        """Проверить, прошло ли с обновления курса больше пяти минут."""
+        try:
+            updated_time = datetime.fromisoformat(updated_at)
+        except ValueError:
+            return True
+        current_time = datetime.now(updated_time.tzinfo)
+        return current_time - updated_time > timedelta(minutes=5)
+
+    @staticmethod
+    def _update_pair_timestamp(
+        rates: dict[str, object],
+        from_code: str,
+        to_code: str,
+        updated_at: str,
+    ) -> None:
+        """Обновить время существующей прямой или обратной пары."""
+        for pair in (f"{from_code}_{to_code}", f"{to_code}_{from_code}"):
+            pair_data = rates.get(pair)
+            if isinstance(pair_data, dict):
+                pair_data["updated_at"] = updated_at
+
+
+class TradingService:
+    """Регистрация, сессия и операции с портфелем пользователя."""
+
+    def __init__(
+        self,
+        users_file: str | Path = USERS_FILE,
+        portfolios_file: str | Path = PORTFOLIOS_FILE,
+        rates_file: str | Path = RATES_FILE,
+    ) -> None:
+        self._users_file = Path(users_file)
+        self._portfolios_file = Path(portfolios_file)
+        self.rate_service = RateService(rates_file)
+        self.current_user: User | None = None
+
+    def register(self, username: str, password: str) -> User:
+        """Зарегистрировать пользователя и создать пустой портфель."""
+        username = self._validate_username(username)
+        self._validate_password(password)
+        users = self._load_records(self._users_file, "пользователей")
+
+        if any(record.get("username") == username for record in users):
+            raise ValueError(f"Имя пользователя '{username}' уже занято")
+
+        user_ids = [record.get("user_id", 0) for record in users]
+        user_id = (
+            max((value for value in user_ids if isinstance(value, int)), default=0) + 1
+        )
+        salt = secrets.token_hex(8)
+        user = User(user_id, username, "", salt, datetime.now())
+        user.change_password(password)
+
+        users.append(self._user_to_record(user))
+        save_json(self._users_file, users)
+
+        portfolios = self._load_records(self._portfolios_file, "портфелей")
+        portfolios.append({"user_id": user_id, "wallets": {}})
+        save_json(self._portfolios_file, portfolios)
+        return user
+
+    def login(self, username: str, password: str) -> User:
+        """Проверить пароль и сохранить пользователя текущей сессии."""
+        username = self._validate_username(username)
+        users = self._load_records(self._users_file, "пользователей")
+        record = next(
+            (item for item in users if item.get("username") == username),
+            None,
+        )
+        if record is None:
+            raise ValueError(f"Пользователь '{username}' не найден")
+
+        user = self._record_to_user(record)
+        if not user.verify_password(password):
+            raise ValueError("Неверный пароль")
+
+        self.current_user = user
+        return user
+
+    def show_portfolio(
+        self,
+        base_currency: str = "USD",
+    ) -> tuple[list[dict[str, str | float]], float]:
+        """Вернуть кошельки и итоговую стоимость в базовой валюте."""
+        user = self._require_login()
+        base_code = normalize_currency_code(base_currency)
+        try:
+            self.rate_service.get_rate(base_code, "USD")
+        except ValueError as error:
+            raise ValueError(f"Неизвестная базовая валюта '{base_code}'") from error
+
+        portfolio = self._load_portfolio(user)
+        rows: list[dict[str, str | float]] = []
+        total = 0.0
+        for currency_code, wallet in portfolio.wallets.items():
+            rate = self.rate_service.get_rate(currency_code, base_code)
+            value = wallet.balance * rate
+            total += value
+            rows.append(
+                {
+                    "currency_code": currency_code,
+                    "balance": wallet.balance,
+                    "value": value,
+                }
+            )
+        return rows, total
+
+    def buy(self, currency_code: str, amount: float) -> dict[str, str | float]:
+        """Добавить купленную валюту в портфель пользователя."""
+        user = self._require_login()
+        code = normalize_currency_code(currency_code)
+        amount = validate_amount(amount)
+        try:
+            rate = self.rate_service.get_rate(code, "USD")
+        except ValueError as error:
+            raise ValueError(f"Не удалось получить курс для {code}→USD") from error
+
+        portfolio = self._load_portfolio(user)
+        wallet = portfolio.get_wallet(code)
+        if wallet is None:
+            portfolio.add_currency(code)
+            wallet = portfolio.get_wallet(code)
+
+        previous_balance = wallet.balance
+        wallet.deposit(amount)
+        self._save_portfolio(portfolio)
+        return {
+            "currency_code": code,
+            "amount": amount,
+            "rate": rate,
+            "previous_balance": previous_balance,
+            "new_balance": wallet.balance,
+            "value": amount * rate,
+        }
+
+    def sell(self, currency_code: str, amount: float) -> dict[str, str | float]:
+        """Уменьшить баланс продаваемой валюты пользователя."""
+        user = self._require_login()
+        code = normalize_currency_code(currency_code)
+        amount = validate_amount(amount)
+        portfolio = self._load_portfolio(user)
+        wallet = portfolio.get_wallet(code)
+        if wallet is None:
+            raise ValueError(
+                f"У вас нет кошелька '{code}'. Добавьте валюту: "
+                "она создаётся автоматически при первой покупке."
+            )
+        if amount > wallet.balance:
+            raise ValueError(
+                f"Недостаточно средств: доступно {wallet.balance:.4f} {code}, "
+                f"требуется {amount:.4f} {code}"
+            )
+
+        try:
+            rate = self.rate_service.get_rate(code, "USD")
+        except ValueError as error:
+            raise ValueError(f"Не удалось получить курс для {code}→USD") from error
+
+        previous_balance = wallet.balance
+        wallet.withdraw(amount)
+        self._save_portfolio(portfolio)
+        return {
+            "currency_code": code,
+            "amount": amount,
+            "rate": rate,
+            "previous_balance": previous_balance,
+            "new_balance": wallet.balance,
+            "value": amount * rate,
+        }
+
+    def _require_login(self) -> User:
+        if self.current_user is None:
+            raise ValueError("Сначала выполните login")
+        return self.current_user
+
+    def _load_portfolio(self, user: User) -> Portfolio:
+        records = self._load_records(self._portfolios_file, "портфелей")
+        record = next(
+            (item for item in records if item.get("user_id") == user.user_id),
+            None,
+        )
+        if record is None:
+            raise ValueError("Портфель пользователя не найден")
+
+        wallets_data = record.get("wallets", {})
+        if not isinstance(wallets_data, dict):
+            raise ValueError("Некорректный формат кошельков в portfolios.json")
+
+        wallets: dict[str, Wallet] = {}
+        for currency_code, wallet_data in wallets_data.items():
+            if not isinstance(currency_code, str) or not isinstance(wallet_data, dict):
+                raise ValueError("Некорректный формат кошелька в portfolios.json")
+            wallets[currency_code] = Wallet(
+                currency_code,
+                wallet_data.get("balance", 0.0),
+            )
+        return Portfolio(user, wallets)
+
+    def _save_portfolio(self, portfolio: Portfolio) -> None:
+        records = self._load_records(self._portfolios_file, "портфелей")
+        wallets = {
+            code: {"balance": wallet.balance}
+            for code, wallet in portfolio.wallets.items()
+        }
+        for record in records:
+            if record.get("user_id") == portfolio.user.user_id:
+                record["wallets"] = wallets
+                save_json(self._portfolios_file, records)
+                return
+        raise ValueError("Портфель пользователя не найден")
+
+    @staticmethod
+    def _load_records(file_path: Path, data_name: str) -> list[dict[str, object]]:
+        data = load_json(file_path, [])
+        if not isinstance(data, list) or not all(
+            isinstance(item, dict) for item in data
+        ):
+            raise ValueError(f"Файл {data_name} должен содержать список объектов")
+        return data
+
+    @staticmethod
+    def _validate_username(username: object) -> str:
+        if not isinstance(username, str) or not username.strip():
+            raise ValueError("Имя пользователя не может быть пустым")
+        return username.strip()
+
+    @staticmethod
+    def _validate_password(password: object) -> None:
+        if not isinstance(password, str) or len(password) < 4:
+            raise ValueError("Пароль должен быть не короче 4 символов")
+
+    @staticmethod
+    def _user_to_record(user: User) -> dict[str, object]:
+        return {
+            "user_id": user.user_id,
+            "username": user.username,
+            "hashed_password": user.hashed_password,
+            "salt": user.salt,
+            "registration_date": user.registration_date.isoformat(),
+        }
+
+    @staticmethod
+    def _record_to_user(record: dict[str, object]) -> User:
+        try:
+            return User(
+                user_id=int(record["user_id"]),
+                username=str(record["username"]),
+                hashed_password=str(record["hashed_password"]),
+                salt=str(record["salt"]),
+                registration_date=datetime.fromisoformat(
+                    str(record["registration_date"])
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Некорректная запись пользователя в users.json") from error

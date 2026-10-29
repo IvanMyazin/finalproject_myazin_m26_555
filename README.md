@@ -24,6 +24,20 @@ uv sync
 uv run valutatrade-hub
 ```
 
+Приложение откроет интерактивную сессию. После `login` в этой же сессии доступны
+операции с портфелем:
+
+```text
+register --username alice --password 1234
+login --username alice --password 1234
+show-portfolio --base USD
+buy --currency BTC --amount 0.05
+sell --currency BTC --amount 0.01
+get-rate --from BTC --to USD
+```
+
+Команда `help` показывает доступные команды, `exit` завершает приложение.
+
 ## Проверка кода
 
 ```bash
