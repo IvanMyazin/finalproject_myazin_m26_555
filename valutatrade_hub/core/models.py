@@ -76,7 +76,5 @@ class User:
     def verify_password(self, password: str) -> bool:
         """Проверить, совпадает ли введённый пароль с сохранённым."""
         password_with_salt = password + self._salt
-        password_hash = hashlib.sha256(
-            password_with_salt.encode("utf-8")
-        ).hexdigest()
+        password_hash = hashlib.sha256(password_with_salt.encode("utf-8")).hexdigest()
         return password_hash == self._hashed_password
