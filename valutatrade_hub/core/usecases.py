@@ -14,6 +14,7 @@ from valutatrade_hub.core.utils import (
     save_json,
     validate_amount,
 )
+from valutatrade_hub.decorators import log_action
 from valutatrade_hub.infra.settings import SettingsLoader
 
 
@@ -257,6 +258,7 @@ class TradingService:
             )
         return rows, total
 
+    @log_action("BUY", verbose=True)
     def buy(self, currency_code: str, amount: float) -> dict[str, str | float]:
         """Добавить купленную валюту в портфель пользователя."""
         user = self._require_login()
@@ -282,6 +284,7 @@ class TradingService:
             "value": amount * rate,
         }
 
+    @log_action("SELL", verbose=True)
     def sell(self, currency_code: str, amount: float) -> dict[str, str | float]:
         """Уменьшить баланс продаваемой валюты пользователя."""
         user = self._require_login()
