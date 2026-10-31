@@ -5,7 +5,20 @@ import sys
 
 from prettytable import PrettyTable
 
+from valutatrade_hub.core.currencies import CURRENCY_REGISTRY
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+)
 from valutatrade_hub.core.usecases import TradingService
+from valutatrade_hub.parser_service.api_clients import (
+    CoinGeckoClient,
+    ExchangeRateApiClient,
+)
+from valutatrade_hub.parser_service.config import ParserConfig
+from valutatrade_hub.parser_service.storage import RatesStorage
+from valutatrade_hub.parser_service.updater import RatesUpdater
 
 
 class CommandInterface:
@@ -30,12 +43,24 @@ class CommandInterface:
                 "buy": self._buy,
                 "sell": self._sell,
                 "get-rate": self._get_rate,
+                "update-rates": self._update_rates,
+                "show-rates": self._show_rates,
                 "help": self._help,
             }
             handler = handlers.get(command)
             if handler is None:
                 return f"Неизвестная команда '{command}'. Введите help."
             return handler(arguments)
+        except InsufficientFundsError as error:
+            return str(error)
+        except CurrencyNotFoundError as error:
+            supported_codes = ", ".join(CURRENCY_REGISTRY)
+            return (
+                f"{error}. Используйте: help get-rate.\n"
+                f"Поддерживаемые валюты: {supported_codes}"
+            )
+        except ApiRequestError as error:
+            return f"{error}. Повторите попытку позже или проверьте сеть."
         except (TypeError, ValueError) as error:
             return str(error)
 
@@ -53,7 +78,11 @@ class CommandInterface:
         return f"Вы вошли как '{user.username}'"
 
     def _show_portfolio(self, arguments: list[str]) -> str:
-        options = self._parse_options(arguments, set(), {"base": "USD"})
+        options = self._parse_options(
+            arguments,
+            set(),
+            {"base": self.service.default_base_currency},
+        )
         base_code = options["base"].strip().upper()
         rows, total = self.service.show_portfolio(base_code)
         user = self.service.current_user
@@ -80,37 +109,52 @@ class CommandInterface:
     def _buy(self, arguments: list[str]) -> str:
         options = self._parse_options(arguments, {"currency", "amount"})
         amount = self._parse_amount(options["amount"])
-        result = self.service.buy(options["currency"], amount)
-        return (
-            f"Покупка выполнена: {result['amount']:.4f} "
-            f"{result['currency_code']} по курсу {result['rate']:.2f} USD/"
-            f"{result['currency_code']}\n"
-            "Изменения в портфеле:\n"
-            f"- {result['currency_code']}: было {result['previous_balance']:.4f} "
-            f"→ стало {result['new_balance']:.4f}\n"
-            f"Оценочная стоимость покупки: {result['value']:,.2f} USD"
+        user_id = self._get_current_user_id()
+        result = self.service.buy(user_id, options["currency"], amount)
+        return self._format_trade_result(
+            action="Покупка",
+            value_label="Оценочная стоимость",
+            result=result,
         )
 
     def _sell(self, arguments: list[str]) -> str:
         options = self._parse_options(arguments, {"currency", "amount"})
         amount = self._parse_amount(options["amount"])
-        result = self.service.sell(options["currency"], amount)
+        user_id = self._get_current_user_id()
+        result = self.service.sell(user_id, options["currency"], amount)
+        return self._format_trade_result(
+            action="Продажа",
+            value_label="Оценочная выручка",
+            result=result,
+        )
+
+    def _format_trade_result(
+        self,
+        action: str,
+        value_label: str,
+        result: dict[str, str | float],
+    ) -> str:
+        """Сформировать подробный результат покупки или продажи."""
+        user = self.service.current_user
+        if user is None:
+            raise ValueError("Сначала выполните login")
+
+        code = str(result["currency_code"])
+        base_code = self.service.default_base_currency
         return (
-            f"Продажа выполнена: {result['amount']:.4f} "
-            f"{result['currency_code']} по курсу {result['rate']:.2f} USD/"
-            f"{result['currency_code']}\n"
-            "Изменения в портфеле:\n"
-            f"- {result['currency_code']}: было {result['previous_balance']:.4f} "
-            f"→ стало {result['new_balance']:.4f}\n"
-            f"Оценочная выручка: {result['value']:,.2f} USD"
+            f"{action} выполнена для пользователя '{user.username}':\n"
+            f"- Валюта: {code}\n"
+            f"- Количество: {result['amount']:.4f} {code}\n"
+            f"- Курс: {result['rate']:,.2f} {base_code}/{code}\n"
+            f"- Баланс: {result['previous_balance']:.4f} → "
+            f"{result['new_balance']:.4f} {code}\n"
+            f"- {value_label}: {result['value']:,.2f} {base_code}"
         )
 
     def _get_rate(self, arguments: list[str]) -> str:
         options = self._parse_options(arguments, {"from", "to"})
         try:
-            info = self.service.rate_service.get_rate_info(
-                options["from"], options["to"]
-            )
+            info = self.service.rate_service.get_rate(options["from"], options["to"])
         except ValueError as error:
             from_code = options["from"].strip().upper()
             to_code = options["to"].strip().upper()
@@ -127,9 +171,107 @@ class CommandInterface:
             f"{reverse_rate:.8f}"
         )
 
+    def _update_rates(self, arguments: list[str]) -> str:
+        options = self._parse_options(arguments, set(), {"source": ""})
+        updater = self._create_rates_updater(options["source"])
+        lines = ["INFO: Starting rates update..."]
+        try:
+            rates = updater.run_update()
+        except ApiRequestError as error:
+            for source, message in updater.last_errors:
+                lines.append(f"ERROR: Failed to fetch from {source}: {message}")
+            lines.append(f"Update failed: {error}")
+            lines.append("Check logs/parser.log for details.")
+            return "\n".join(lines)
+
+        errors = dict(updater.last_errors)
+        for client in updater.clients:
+            source = client.source
+            if source in updater.last_results:
+                count = updater.last_results[source]
+                lines.append(f"INFO: Fetching from {source}... OK ({count} rates)")
+            elif source in errors:
+                lines.append(f"ERROR: Failed to fetch from {source}: {errors[source]}")
+
+        lines.append(f"INFO: Writing {len(rates)} rates to data/rates.json...")
+        if updater.last_errors:
+            lines.append(
+                "Update completed with errors. Check logs/parser.log for details."
+            )
+        else:
+            lines.append(
+                f"Update successful. Total rates updated: {len(rates)}. "
+                f"Last refresh: {updater.last_refresh}"
+            )
+        return "\n".join(lines)
+
+    def _create_rates_updater(self, source: str) -> RatesUpdater:
+        """Создать обновлятор для всех или одного выбранного источника."""
+        config = ParserConfig()
+        available_clients = {
+            "coingecko": CoinGeckoClient(config),
+            "exchangerate": ExchangeRateApiClient(config),
+        }
+        source_name = source.strip().lower()
+        if source_name:
+            client = available_clients.get(source_name)
+            if client is None:
+                raise ValueError(
+                    f"Неизвестный источник '{source}'. "
+                    "Доступные источники: coingecko, exchangerate"
+                )
+            clients = [client]
+        else:
+            clients = list(available_clients.values())
+        return RatesUpdater(clients, RatesStorage(config))
+
+    def _show_rates(self, arguments: list[str]) -> str:
+        options = self._parse_options(
+            arguments,
+            set(),
+            {
+                "currency": "",
+                "top": "",
+                "base": self.service.default_base_currency,
+            },
+        )
+        top = self._parse_top(options["top"])
+        currency = options["currency"] or None
+        rows, last_refresh = self.service.rate_service.get_cached_rates(
+            currency_code=currency,
+            top=top,
+            base_currency=options["base"],
+        )
+
+        table = PrettyTable()
+        table.field_names = ["Пара", "Курс", "Обновлено", "Источник"]
+        for row in rows:
+            table.add_row(
+                [
+                    row["pair"],
+                    f"{row['rate']:,.8f}",
+                    row["updated_at"],
+                    row["source"],
+                ]
+            )
+        return f"Курсы из кеша (обновлено: {last_refresh}):\n{table}"
+
+    def _get_current_user_id(self) -> int:
+        """Вернуть ID пользователя текущей CLI-сессии."""
+        if self.service.current_user is None:
+            raise ValueError("Сначала выполните login")
+        return self.service.current_user.user_id
+
     def _help(self, arguments: list[str]) -> str:
+        if arguments == ["get-rate"]:
+            supported_codes = ", ".join(CURRENCY_REGISTRY)
+            return (
+                "get-rate --from <код> --to <код>\n"
+                "Показывает текущий курс одной валюты к другой.\n"
+                f"Поддерживаемые валюты: {supported_codes}"
+            )
         if arguments:
-            raise ValueError("Команда help не принимает аргументы")
+            raise ValueError("Справка для указанной команды не найдена")
         return (
             "Доступные команды:\n"
             "  register --username <имя> --password <пароль>\n"
@@ -138,6 +280,8 @@ class CommandInterface:
             "  buy --currency <код> --amount <сумма>\n"
             "  sell --currency <код> --amount <сумма>\n"
             "  get-rate --from <код> --to <код>\n"
+            "  update-rates [--source coingecko|exchangerate]\n"
+            "  show-rates [--currency <код>] [--top <N>] [--base <код>]\n"
             "  exit"
         )
 
@@ -177,6 +321,18 @@ class CommandInterface:
         if amount <= 0:
             raise ValueError("'amount' должен быть положительным числом")
         return amount
+
+    @staticmethod
+    def _parse_top(value: str) -> int | None:
+        if not value:
+            return None
+        try:
+            top = int(value)
+        except ValueError as error:
+            raise ValueError("'top' должен быть положительным целым числом") from error
+        if top <= 0:
+            raise ValueError("'top' должен быть положительным целым числом")
+        return top
 
 
 def main() -> None:
