@@ -9,12 +9,12 @@ from valutatrade_hub.core.exceptions import ApiRequestError, InsufficientFundsEr
 from valutatrade_hub.core.models import Portfolio, User, Wallet
 from valutatrade_hub.core.utils import (
     PROJECT_ROOT,
-    load_json,
+    JsonData,
     normalize_currency_code,
-    save_json,
     validate_amount,
 )
 from valutatrade_hub.decorators import log_action
+from valutatrade_hub.infra.database import DatabaseManager
 from valutatrade_hub.infra.settings import SettingsLoader
 
 
@@ -31,6 +31,7 @@ class RateService:
 
     def __init__(self, rates_file: str | Path | None = None) -> None:
         self._settings = SettingsLoader()
+        self._database = DatabaseManager()
         self._rates_file = (
             Path(rates_file)
             if rates_file is not None
@@ -45,8 +46,8 @@ class RateService:
         self,
         from_currency: str,
         to_currency: str | None = None,
-    ) -> float:
-        """Вернуть стоимость одной единицы первой валюты во второй."""
+    ) -> dict[str, str | float]:
+        """Вернуть курс и время обновления локального кеша."""
         from_code = normalize_currency_code(from_currency)
         if to_currency is None:
             to_currency = self._default_base_currency
@@ -54,54 +55,47 @@ class RateService:
         get_currency(from_code)
         get_currency(to_code)
 
+        def resolve_rate(data: JsonData) -> dict[str, str | float]:
+            if not isinstance(data, dict):
+                raise ValueError("Файл курсов должен содержать словарь")
+
+            rate = self._calculate_rate(data, from_code, to_code)
+            updated_at = self._find_updated_at(data, from_code, to_code)
+            if self._is_outdated(updated_at):
+                updated_at = datetime.now().isoformat(timespec="seconds")
+                data["source"] = "Stub"
+                data["last_refresh"] = updated_at
+                self._update_pair_timestamp(data, from_code, to_code, updated_at)
+
+            return {
+                "from_currency": from_code,
+                "to_currency": to_code,
+                "rate": rate,
+                "updated_at": updated_at,
+            }
+
+        return self._database.update_json(self._rates_file, resolve_rate, {})
+
+    @classmethod
+    def _calculate_rate(
+        cls,
+        rates: dict[str, object],
+        from_code: str,
+        to_code: str,
+    ) -> float:
+        """Рассчитать прямой, обратный или кросс-курс."""
         if from_code == to_code:
             return 1.0
 
-        rates = load_json(self._rates_file, {})
-        if not isinstance(rates, dict):
-            raise ValueError("Файл курсов должен содержать словарь")
-
-        direct_rate = self._find_direct_rate(rates, from_code, to_code)
+        direct_rate = cls._find_direct_rate(rates, from_code, to_code)
         if direct_rate is not None:
             return direct_rate
 
-        from_usd = self._find_direct_rate(rates, from_code, "USD")
-        to_usd = self._find_direct_rate(rates, to_code, "USD")
+        from_usd = cls._find_direct_rate(rates, from_code, "USD")
+        to_usd = cls._find_direct_rate(rates, to_code, "USD")
         if from_usd is None or to_usd is None:
             raise ApiRequestError(f"курс {from_code}→{to_code} недоступен")
-
         return from_usd / to_usd
-
-    def get_rate_info(
-        self,
-        from_currency: str,
-        to_currency: str | None = None,
-    ) -> dict[str, str | float]:
-        """Вернуть курс и время обновления локального кеша."""
-        from_code = normalize_currency_code(from_currency)
-        if to_currency is None:
-            to_currency = self._default_base_currency
-        to_code = normalize_currency_code(to_currency)
-        rate = self.get_rate(from_code, to_code)
-
-        rates = load_json(self._rates_file, {})
-        if not isinstance(rates, dict):
-            raise ValueError("Файл курсов должен содержать словарь")
-
-        updated_at = self._find_updated_at(rates, from_code, to_code)
-        if self._is_outdated(updated_at):
-            updated_at = datetime.now().isoformat(timespec="seconds")
-            rates["source"] = "Stub"
-            rates["last_refresh"] = updated_at
-            self._update_pair_timestamp(rates, from_code, to_code, updated_at)
-            save_json(self._rates_file, rates)
-
-        return {
-            "from_currency": from_code,
-            "to_currency": to_code,
-            "rate": rate,
-            "updated_at": updated_at,
-        }
 
     @staticmethod
     def _find_direct_rate(
@@ -172,6 +166,7 @@ class TradingService:
         rates_file: str | Path | None = None,
     ) -> None:
         self._settings = SettingsLoader()
+        self._database = DatabaseManager()
         self._users_file = (
             Path(users_file)
             if users_file is not None
@@ -192,25 +187,38 @@ class TradingService:
         """Зарегистрировать пользователя и создать пустой портфель."""
         username = self._validate_username(username)
         self._validate_password(password)
-        users = self._load_records(self._users_file, "пользователей")
 
-        if any(record.get("username") == username for record in users):
-            raise ValueError(f"Имя пользователя '{username}' уже занято")
+        def add_user(data: JsonData) -> User:
+            users = self._validate_records(data, "пользователей")
+            if any(record.get("username") == username for record in users):
+                raise ValueError(f"Имя пользователя '{username}' уже занято")
 
-        user_ids = [record.get("user_id", 0) for record in users]
-        user_id = (
-            max((value for value in user_ids if isinstance(value, int)), default=0) + 1
-        )
-        salt = secrets.token_hex(8)
-        user = User(user_id, username, "", salt, datetime.now())
-        user.change_password(password)
+            user_ids = [record.get("user_id", 0) for record in users]
+            user_id = (
+                max(
+                    (value for value in user_ids if isinstance(value, int)),
+                    default=0,
+                )
+                + 1
+            )
+            user = User(
+                user_id,
+                username,
+                "",
+                secrets.token_hex(8),
+                datetime.now(),
+            )
+            user.change_password(password)
+            users.append(self._user_to_record(user))
+            return user
 
-        users.append(self._user_to_record(user))
-        save_json(self._users_file, users)
+        user = self._database.update_json(self._users_file, add_user, [])
 
-        portfolios = self._load_records(self._portfolios_file, "портфелей")
-        portfolios.append({"user_id": user_id, "wallets": {}})
-        save_json(self._portfolios_file, portfolios)
+        def add_portfolio(data: JsonData) -> None:
+            portfolios = self._validate_records(data, "портфелей")
+            portfolios.append({"user_id": user.user_id, "wallets": {}})
+
+        self._database.update_json(self._portfolios_file, add_portfolio, [])
         return user
 
     def login(self, username: str, password: str) -> User:
@@ -246,7 +254,8 @@ class TradingService:
         rows: list[dict[str, str | float]] = []
         total = 0.0
         for currency_code, wallet in portfolio.wallets.items():
-            rate = self.rate_service.get_rate(currency_code, base_code)
+            rate_info = self.rate_service.get_rate(currency_code, base_code)
+            rate = float(rate_info["rate"])
             value = wallet.balance * rate
             total += value
             rows.append(
@@ -259,12 +268,19 @@ class TradingService:
         return rows, total
 
     @log_action("BUY", verbose=True)
-    def buy(self, currency_code: str, amount: float) -> dict[str, str | float]:
+    def buy(
+        self,
+        user_id: int,
+        currency_code: str,
+        amount: float,
+    ) -> dict[str, str | float]:
         """Добавить купленную валюту в портфель пользователя."""
-        user = self._require_login()
-        code = normalize_currency_code(currency_code)
+        user = self._require_user(user_id)
         amount = validate_amount(amount)
-        rate = self.rate_service.get_rate(code, "USD")
+        currency = get_currency(currency_code)
+        code = currency.code
+        rate_info = self.rate_service.get_rate(code, "USD")
+        rate = float(rate_info["rate"])
 
         portfolio = self._load_portfolio(user)
         wallet = portfolio.get_wallet(code)
@@ -285,22 +301,26 @@ class TradingService:
         }
 
     @log_action("SELL", verbose=True)
-    def sell(self, currency_code: str, amount: float) -> dict[str, str | float]:
+    def sell(
+        self,
+        user_id: int,
+        currency_code: str,
+        amount: float,
+    ) -> dict[str, str | float]:
         """Уменьшить баланс продаваемой валюты пользователя."""
-        user = self._require_login()
-        code = normalize_currency_code(currency_code)
+        user = self._require_user(user_id)
         amount = validate_amount(amount)
+        currency = get_currency(currency_code)
+        code = currency.code
         portfolio = self._load_portfolio(user)
         wallet = portfolio.get_wallet(code)
         if wallet is None:
-            raise ValueError(
-                f"У вас нет кошелька '{code}'. Добавьте валюту: "
-                "она создаётся автоматически при первой покупке."
-            )
+            raise InsufficientFundsError(0.0, amount, code)
         if amount > wallet.balance:
             raise InsufficientFundsError(wallet.balance, amount, code)
 
-        rate = self.rate_service.get_rate(code, "USD")
+        rate_info = self.rate_service.get_rate(code, "USD")
+        rate = float(rate_info["rate"])
 
         previous_balance = wallet.balance
         wallet.withdraw(amount)
@@ -318,6 +338,13 @@ class TradingService:
         if self.current_user is None:
             raise ValueError("Сначала выполните login")
         return self.current_user
+
+    def _require_user(self, user_id: int) -> User:
+        """Проверить сессию и соответствие переданного пользователя."""
+        user = self._require_login()
+        if user.user_id != user_id:
+            raise ValueError("Нельзя выполнять операции с чужим портфелем")
+        return user
 
     def _load_portfolio(self, user: User) -> Portfolio:
         records = self._load_records(self._portfolios_file, "портфелей")
@@ -343,21 +370,34 @@ class TradingService:
         return Portfolio(user, wallets)
 
     def _save_portfolio(self, portfolio: Portfolio) -> None:
-        records = self._load_records(self._portfolios_file, "портфелей")
         wallets = {
             code: {"balance": wallet.balance}
             for code, wallet in portfolio.wallets.items()
         }
-        for record in records:
-            if record.get("user_id") == portfolio.user.user_id:
-                record["wallets"] = wallets
-                save_json(self._portfolios_file, records)
-                return
-        raise ValueError("Портфель пользователя не найден")
+
+        def update_portfolio(data: JsonData) -> None:
+            records = self._validate_records(data, "портфелей")
+            for record in records:
+                if record.get("user_id") == portfolio.user.user_id:
+                    record["wallets"] = wallets
+                    return
+            raise ValueError("Портфель пользователя не найден")
+
+        self._database.update_json(self._portfolios_file, update_portfolio, [])
+
+    def _load_records(
+        self,
+        file_path: Path,
+        data_name: str,
+    ) -> list[dict[str, object]]:
+        data = self._database.read_json(file_path, [])
+        return self._validate_records(data, data_name)
 
     @staticmethod
-    def _load_records(file_path: Path, data_name: str) -> list[dict[str, object]]:
-        data = load_json(file_path, [])
+    def _validate_records(
+        data: JsonData,
+        data_name: str,
+    ) -> list[dict[str, object]]:
         if not isinstance(data, list) or not all(
             isinstance(item, dict) for item in data
         ):

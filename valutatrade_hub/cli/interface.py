@@ -100,7 +100,8 @@ class CommandInterface:
     def _buy(self, arguments: list[str]) -> str:
         options = self._parse_options(arguments, {"currency", "amount"})
         amount = self._parse_amount(options["amount"])
-        result = self.service.buy(options["currency"], amount)
+        user_id = self._get_current_user_id()
+        result = self.service.buy(user_id, options["currency"], amount)
         return (
             f"Покупка выполнена: {result['amount']:.4f} "
             f"{result['currency_code']} по курсу {result['rate']:.2f} USD/"
@@ -114,7 +115,8 @@ class CommandInterface:
     def _sell(self, arguments: list[str]) -> str:
         options = self._parse_options(arguments, {"currency", "amount"})
         amount = self._parse_amount(options["amount"])
-        result = self.service.sell(options["currency"], amount)
+        user_id = self._get_current_user_id()
+        result = self.service.sell(user_id, options["currency"], amount)
         return (
             f"Продажа выполнена: {result['amount']:.4f} "
             f"{result['currency_code']} по курсу {result['rate']:.2f} USD/"
@@ -128,9 +130,7 @@ class CommandInterface:
     def _get_rate(self, arguments: list[str]) -> str:
         options = self._parse_options(arguments, {"from", "to"})
         try:
-            info = self.service.rate_service.get_rate_info(
-                options["from"], options["to"]
-            )
+            info = self.service.rate_service.get_rate(options["from"], options["to"])
         except ValueError as error:
             from_code = options["from"].strip().upper()
             to_code = options["to"].strip().upper()
@@ -146,6 +146,12 @@ class CommandInterface:
             f"Обратный курс {info['to_currency']}→{info['from_currency']}: "
             f"{reverse_rate:.8f}"
         )
+
+    def _get_current_user_id(self) -> int:
+        """Вернуть ID пользователя текущей CLI-сессии."""
+        if self.service.current_user is None:
+            raise ValueError("Сначала выполните login")
+        return self.service.current_user.user_id
 
     def _help(self, arguments: list[str]) -> str:
         if arguments == ["get-rate"]:
