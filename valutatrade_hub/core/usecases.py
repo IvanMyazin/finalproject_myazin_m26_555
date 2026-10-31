@@ -55,26 +55,33 @@ class RateService:
         get_currency(from_code)
         get_currency(to_code)
 
-        def resolve_rate(data: JsonData) -> dict[str, str | float]:
-            if not isinstance(data, dict):
-                raise ValueError("Файл курсов должен содержать словарь")
+        data = self._database.read_json(self._rates_file, {})
+        if not isinstance(data, dict):
+            raise ValueError("Файл курсов должен содержать словарь")
 
-            rate = self._calculate_rate(data, from_code, to_code)
-            updated_at = self._find_updated_at(data, from_code, to_code)
-            if self._is_outdated(updated_at):
-                updated_at = datetime.now().isoformat(timespec="seconds")
-                data["source"] = "Stub"
-                data["last_refresh"] = updated_at
-                self._update_pair_timestamp(data, from_code, to_code, updated_at)
+        pairs = self._extract_pairs(data)
+        rate = self._calculate_rate(pairs, from_code, to_code)
+        updated_at = self._find_updated_at(pairs, from_code, to_code)
+        if not updated_at:
+            last_refresh = data.get("last_refresh", "")
+            updated_at = last_refresh if isinstance(last_refresh, str) else ""
+        if self._is_outdated(updated_at):
+            raise ApiRequestError(f"данные курса {from_code}→{to_code} устарели")
 
-            return {
-                "from_currency": from_code,
-                "to_currency": to_code,
-                "rate": rate,
-                "updated_at": updated_at,
-            }
+        return {
+            "from_currency": from_code,
+            "to_currency": to_code,
+            "rate": rate,
+            "updated_at": updated_at,
+        }
 
-        return self._database.update_json(self._rates_file, resolve_rate, {})
+    @staticmethod
+    def _extract_pairs(data: dict[str, object]) -> dict[str, object]:
+        """Поддержать новый вложенный и прежний плоский формат кеша."""
+        pairs = data.get("pairs")
+        if isinstance(pairs, dict):
+            return pairs
+        return data
 
     @classmethod
     def _calculate_rate(
@@ -141,19 +148,6 @@ class RateService:
             return True
         current_time = datetime.now(updated_time.tzinfo)
         return current_time - updated_time > timedelta(seconds=self._rates_ttl_seconds)
-
-    @staticmethod
-    def _update_pair_timestamp(
-        rates: dict[str, object],
-        from_code: str,
-        to_code: str,
-        updated_at: str,
-    ) -> None:
-        """Обновить время существующей прямой или обратной пары."""
-        for pair in (f"{from_code}_{to_code}", f"{to_code}_{from_code}"):
-            pair_data = rates.get(pair)
-            if isinstance(pair_data, dict):
-                pair_data["updated_at"] = updated_at
 
 
 class TradingService:
