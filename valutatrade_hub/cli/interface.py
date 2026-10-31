@@ -5,6 +5,12 @@ import sys
 
 from prettytable import PrettyTable
 
+from valutatrade_hub.core.currencies import CURRENCY_REGISTRY
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+)
 from valutatrade_hub.core.usecases import TradingService
 
 
@@ -36,6 +42,16 @@ class CommandInterface:
             if handler is None:
                 return f"Неизвестная команда '{command}'. Введите help."
             return handler(arguments)
+        except InsufficientFundsError as error:
+            return str(error)
+        except CurrencyNotFoundError as error:
+            supported_codes = ", ".join(CURRENCY_REGISTRY)
+            return (
+                f"{error}. Используйте: help get-rate.\n"
+                f"Поддерживаемые валюты: {supported_codes}"
+            )
+        except ApiRequestError as error:
+            return f"{error}. Повторите попытку позже или проверьте сеть."
         except (TypeError, ValueError) as error:
             return str(error)
 
@@ -128,8 +144,15 @@ class CommandInterface:
         )
 
     def _help(self, arguments: list[str]) -> str:
+        if arguments == ["get-rate"]:
+            supported_codes = ", ".join(CURRENCY_REGISTRY)
+            return (
+                "get-rate --from <код> --to <код>\n"
+                "Показывает текущий курс одной валюты к другой.\n"
+                f"Поддерживаемые валюты: {supported_codes}"
+            )
         if arguments:
-            raise ValueError("Команда help не принимает аргументы")
+            raise ValueError("Справка для указанной команды не найдена")
         return (
             "Доступные команды:\n"
             "  register --username <имя> --password <пароль>\n"

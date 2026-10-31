@@ -85,10 +85,10 @@ CURRENCY_REGISTRY: dict[str, Currency] = {
 def get_currency(code: str) -> Currency:
     """Вернуть объект валюты из реестра по её коду."""
     if not isinstance(code, str):
-        raise CurrencyNotFoundError(f"Валюта '{code}' не найдена")
+        raise CurrencyNotFoundError(str(code))
 
     normalized_code = code.strip().upper()
     currency = CURRENCY_REGISTRY.get(normalized_code)
     if currency is None:
-        raise CurrencyNotFoundError(f"Валюта '{normalized_code}' не найдена")
+        raise CurrencyNotFoundError(normalized_code)
     return currency

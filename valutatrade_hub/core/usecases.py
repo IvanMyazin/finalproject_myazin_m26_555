@@ -4,6 +4,8 @@ import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from valutatrade_hub.core.currencies import get_currency
+from valutatrade_hub.core.exceptions import ApiRequestError, InsufficientFundsError
 from valutatrade_hub.core.models import Portfolio, User, Wallet
 from valutatrade_hub.core.utils import (
     PORTFOLIOS_FILE,
@@ -26,6 +28,8 @@ class RateService:
         """Вернуть стоимость одной единицы первой валюты во второй."""
         from_code = normalize_currency_code(from_currency)
         to_code = normalize_currency_code(to_currency)
+        get_currency(from_code)
+        get_currency(to_code)
 
         if from_code == to_code:
             return 1.0
@@ -41,7 +45,7 @@ class RateService:
         from_usd = self._find_direct_rate(rates, from_code, "USD")
         to_usd = self._find_direct_rate(rates, to_code, "USD")
         if from_usd is None or to_usd is None:
-            raise ValueError(f"Курс {from_code}/{to_code} не найден")
+            raise ApiRequestError(f"курс {from_code}→{to_code} недоступен")
 
         return from_usd / to_usd
 
@@ -198,10 +202,7 @@ class TradingService:
         """Вернуть кошельки и итоговую стоимость в базовой валюте."""
         user = self._require_login()
         base_code = normalize_currency_code(base_currency)
-        try:
-            self.rate_service.get_rate(base_code, "USD")
-        except ValueError as error:
-            raise ValueError(f"Неизвестная базовая валюта '{base_code}'") from error
+        self.rate_service.get_rate(base_code, "USD")
 
         portfolio = self._load_portfolio(user)
         rows: list[dict[str, str | float]] = []
@@ -224,10 +225,7 @@ class TradingService:
         user = self._require_login()
         code = normalize_currency_code(currency_code)
         amount = validate_amount(amount)
-        try:
-            rate = self.rate_service.get_rate(code, "USD")
-        except ValueError as error:
-            raise ValueError(f"Не удалось получить курс для {code}→USD") from error
+        rate = self.rate_service.get_rate(code, "USD")
 
         portfolio = self._load_portfolio(user)
         wallet = portfolio.get_wallet(code)
@@ -260,15 +258,9 @@ class TradingService:
                 "она создаётся автоматически при первой покупке."
             )
         if amount > wallet.balance:
-            raise ValueError(
-                f"Недостаточно средств: доступно {wallet.balance:.4f} {code}, "
-                f"требуется {amount:.4f} {code}"
-            )
+            raise InsufficientFundsError(wallet.balance, amount, code)
 
-        try:
-            rate = self.rate_service.get_rate(code, "USD")
-        except ValueError as error:
-            raise ValueError(f"Не удалось получить курс для {code}→USD") from error
+        rate = self.rate_service.get_rate(code, "USD")
 
         previous_balance = wallet.balance
         wallet.withdraw(amount)
