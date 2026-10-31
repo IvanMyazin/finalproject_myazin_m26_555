@@ -102,14 +102,10 @@ class CommandInterface:
         amount = self._parse_amount(options["amount"])
         user_id = self._get_current_user_id()
         result = self.service.buy(user_id, options["currency"], amount)
-        return (
-            f"Покупка выполнена: {result['amount']:.4f} "
-            f"{result['currency_code']} по курсу {result['rate']:.2f} USD/"
-            f"{result['currency_code']}\n"
-            "Изменения в портфеле:\n"
-            f"- {result['currency_code']}: было {result['previous_balance']:.4f} "
-            f"→ стало {result['new_balance']:.4f}\n"
-            f"Оценочная стоимость покупки: {result['value']:,.2f} USD"
+        return self._format_trade_result(
+            action="Покупка",
+            value_label="Оценочная стоимость",
+            result=result,
         )
 
     def _sell(self, arguments: list[str]) -> str:
@@ -117,14 +113,33 @@ class CommandInterface:
         amount = self._parse_amount(options["amount"])
         user_id = self._get_current_user_id()
         result = self.service.sell(user_id, options["currency"], amount)
+        return self._format_trade_result(
+            action="Продажа",
+            value_label="Оценочная выручка",
+            result=result,
+        )
+
+    def _format_trade_result(
+        self,
+        action: str,
+        value_label: str,
+        result: dict[str, str | float],
+    ) -> str:
+        """Сформировать подробный результат покупки или продажи."""
+        user = self.service.current_user
+        if user is None:
+            raise ValueError("Сначала выполните login")
+
+        code = str(result["currency_code"])
+        base_code = self.service.default_base_currency
         return (
-            f"Продажа выполнена: {result['amount']:.4f} "
-            f"{result['currency_code']} по курсу {result['rate']:.2f} USD/"
-            f"{result['currency_code']}\n"
-            "Изменения в портфеле:\n"
-            f"- {result['currency_code']}: было {result['previous_balance']:.4f} "
-            f"→ стало {result['new_balance']:.4f}\n"
-            f"Оценочная выручка: {result['value']:,.2f} USD"
+            f"{action} выполнена для пользователя '{user.username}':\n"
+            f"- Валюта: {code}\n"
+            f"- Количество: {result['amount']:.4f} {code}\n"
+            f"- Курс: {result['rate']:,.2f} {base_code}/{code}\n"
+            f"- Баланс: {result['previous_balance']:.4f} → "
+            f"{result['new_balance']:.4f} {code}\n"
+            f"- {value_label}: {result['value']:,.2f} {base_code}"
         )
 
     def _get_rate(self, arguments: list[str]) -> str:
