@@ -75,6 +75,72 @@ class RateService:
             "updated_at": updated_at,
         }
 
+    def get_cached_rates(
+        self,
+        currency_code: str | None = None,
+        top: int | None = None,
+        base_currency: str | None = None,
+    ) -> tuple[list[dict[str, str | float]], str]:
+        """Вернуть курсы из локального кеша с фильтрацией и сортировкой."""
+        data = self._database.read_json(self._rates_file, {})
+        if not isinstance(data, dict):
+            raise ValueError("Файл курсов должен содержать словарь")
+        pairs = self._extract_pairs(data)
+        pair_items = [
+            (pair, details)
+            for pair, details in pairs.items()
+            if isinstance(pair, str)
+            and "_" in pair
+            and isinstance(details, dict)
+            and "rate" in details
+        ]
+        if not pair_items:
+            raise ValueError(
+                "Локальный кеш курсов пуст. Выполните 'update-rates', "
+                "чтобы загрузить данные."
+            )
+
+        requested_code = None
+        if currency_code is not None:
+            requested_code = normalize_currency_code(currency_code)
+
+        base_code = normalize_currency_code(
+            base_currency or self._default_base_currency
+        )
+        get_currency(base_code)
+        crypto_codes = {"BTC", "ETH", "SOL"}
+        rows: list[dict[str, str | float]] = []
+        for pair, details in pair_items:
+            from_code, _ = pair.split("_", maxsplit=1)
+            if requested_code is not None and from_code != requested_code:
+                continue
+            if top is not None and from_code not in crypto_codes:
+                continue
+
+            rate = self._calculate_rate(pairs, from_code, base_code)
+            updated_at = details.get("updated_at", data.get("last_refresh", ""))
+            source = details.get("source", data.get("source", "Unknown"))
+            rows.append(
+                {
+                    "pair": f"{from_code}_{base_code}",
+                    "rate": rate,
+                    "updated_at": str(updated_at),
+                    "source": str(source),
+                }
+            )
+
+        if requested_code is not None and not rows:
+            raise ValueError(f"Курс для '{requested_code}' не найден в кеше.")
+
+        if top is not None:
+            rows.sort(key=lambda row: float(row["rate"]), reverse=True)
+            rows = rows[:top]
+        else:
+            rows.sort(key=lambda row: str(row["pair"]))
+
+        last_refresh = str(data.get("last_refresh", ""))
+        return rows, last_refresh
+
     @staticmethod
     def _extract_pairs(data: dict[str, object]) -> dict[str, object]:
         """Поддержать новый вложенный и прежний плоский формат кеша."""
