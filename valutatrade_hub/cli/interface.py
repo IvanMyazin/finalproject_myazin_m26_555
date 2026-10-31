@@ -69,7 +69,11 @@ class CommandInterface:
         return f"Вы вошли как '{user.username}'"
 
     def _show_portfolio(self, arguments: list[str]) -> str:
-        options = self._parse_options(arguments, set(), {"base": "USD"})
+        options = self._parse_options(
+            arguments,
+            set(),
+            {"base": self.service.default_base_currency},
+        )
         base_code = options["base"].strip().upper()
         rows, total = self.service.show_portfolio(base_code)
         user = self.service.current_user

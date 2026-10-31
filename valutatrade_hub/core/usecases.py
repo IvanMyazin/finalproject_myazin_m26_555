@@ -8,25 +8,47 @@ from valutatrade_hub.core.currencies import get_currency
 from valutatrade_hub.core.exceptions import ApiRequestError, InsufficientFundsError
 from valutatrade_hub.core.models import Portfolio, User, Wallet
 from valutatrade_hub.core.utils import (
-    PORTFOLIOS_FILE,
-    RATES_FILE,
-    USERS_FILE,
+    PROJECT_ROOT,
     load_json,
     normalize_currency_code,
     save_json,
     validate_amount,
 )
+from valutatrade_hub.infra.settings import SettingsLoader
+
+
+def _get_configured_path(settings: SettingsLoader, key: str) -> Path:
+    """Преобразовать путь из конфигурации в абсолютный путь проекта."""
+    path = Path(settings.get(key))
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
 
 
 class RateService:
     """Получение обменных курсов из локального JSON-кеша."""
 
-    def __init__(self, rates_file: str | Path = RATES_FILE) -> None:
-        self._rates_file = Path(rates_file)
+    def __init__(self, rates_file: str | Path | None = None) -> None:
+        self._settings = SettingsLoader()
+        self._rates_file = (
+            Path(rates_file)
+            if rates_file is not None
+            else _get_configured_path(self._settings, "rates_file")
+        )
+        self._rates_ttl_seconds = int(self._settings.get("rates_ttl_seconds", 300))
+        self._default_base_currency = str(
+            self._settings.get("default_base_currency", "USD")
+        )
 
-    def get_rate(self, from_currency: str, to_currency: str = "USD") -> float:
+    def get_rate(
+        self,
+        from_currency: str,
+        to_currency: str | None = None,
+    ) -> float:
         """Вернуть стоимость одной единицы первой валюты во второй."""
         from_code = normalize_currency_code(from_currency)
+        if to_currency is None:
+            to_currency = self._default_base_currency
         to_code = normalize_currency_code(to_currency)
         get_currency(from_code)
         get_currency(to_code)
@@ -52,10 +74,12 @@ class RateService:
     def get_rate_info(
         self,
         from_currency: str,
-        to_currency: str = "USD",
+        to_currency: str | None = None,
     ) -> dict[str, str | float]:
         """Вернуть курс и время обновления локального кеша."""
         from_code = normalize_currency_code(from_currency)
+        if to_currency is None:
+            to_currency = self._default_base_currency
         to_code = normalize_currency_code(to_currency)
         rate = self.get_rate(from_code, to_code)
 
@@ -114,15 +138,14 @@ class RateService:
             return last_refresh
         return ""
 
-    @staticmethod
-    def _is_outdated(updated_at: str) -> bool:
+    def _is_outdated(self, updated_at: str) -> bool:
         """Проверить, прошло ли с обновления курса больше пяти минут."""
         try:
             updated_time = datetime.fromisoformat(updated_at)
         except ValueError:
             return True
         current_time = datetime.now(updated_time.tzinfo)
-        return current_time - updated_time > timedelta(minutes=5)
+        return current_time - updated_time > timedelta(seconds=self._rates_ttl_seconds)
 
     @staticmethod
     def _update_pair_timestamp(
@@ -143,12 +166,24 @@ class TradingService:
 
     def __init__(
         self,
-        users_file: str | Path = USERS_FILE,
-        portfolios_file: str | Path = PORTFOLIOS_FILE,
-        rates_file: str | Path = RATES_FILE,
+        users_file: str | Path | None = None,
+        portfolios_file: str | Path | None = None,
+        rates_file: str | Path | None = None,
     ) -> None:
-        self._users_file = Path(users_file)
-        self._portfolios_file = Path(portfolios_file)
+        self._settings = SettingsLoader()
+        self._users_file = (
+            Path(users_file)
+            if users_file is not None
+            else _get_configured_path(self._settings, "users_file")
+        )
+        self._portfolios_file = (
+            Path(portfolios_file)
+            if portfolios_file is not None
+            else _get_configured_path(self._settings, "portfolios_file")
+        )
+        self.default_base_currency = str(
+            self._settings.get("default_base_currency", "USD")
+        )
         self.rate_service = RateService(rates_file)
         self.current_user: User | None = None
 
@@ -197,10 +232,12 @@ class TradingService:
 
     def show_portfolio(
         self,
-        base_currency: str = "USD",
+        base_currency: str | None = None,
     ) -> tuple[list[dict[str, str | float]], float]:
         """Вернуть кошельки и итоговую стоимость в базовой валюте."""
         user = self._require_login()
+        if base_currency is None:
+            base_currency = self.default_base_currency
         base_code = normalize_currency_code(base_currency)
         self.rate_service.get_rate(base_code, "USD")
 

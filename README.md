@@ -38,6 +38,18 @@ get-rate --from BTC --to USD
 
 Команда `help` показывает доступные команды, `exit` завершает приложение.
 
+## Конфигурация
+
+Настройки находятся в секции `[tool.valutatrade]` файла `pyproject.toml`:
+
+- `data_dir`, `users_file`, `portfolios_file`, `rates_file` — пути к данным;
+- `rates_ttl_seconds` — срок свежести курса в секундах;
+- `default_base_currency` — базовая валюта по умолчанию;
+- `logs_dir`, `log_file`, `log_format` — каталог, файл и формат будущих логов.
+
+Настройки загружает Singleton `SettingsLoader`. Метод `get()` возвращает значение,
+а `reload()` повторно читает конфигурацию из `pyproject.toml`.
+
 ## Ошибки команд
 
 - `sell`: при недостаточном балансе показываются доступная и требуемая суммы.
